@@ -26,6 +26,14 @@ jobs:
       - name: Mark start
         run: echo "START=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Free disk space (more room for the phone)
+        run: |
+          df -h / | tail -n 1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /opt/microsoft || true
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          sudo apt-get clean || true
+          df -h / | tail -n 1
+
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -72,6 +80,9 @@ jobs:
           CFG="$ANDROID_AVD_HOME/play.avd/config.ini"
           ls "$CFG" || { echo "AVD NOT CREATED"; ls -R "$HOME/.android" "$HOME/.config/.android" 2>&1 | head -30; exit 1; }
           sed -i '/^hw.ramSize/d;/^hw.lcd/d;/^hw.keyboard/d;/^hw.gpu/d;/^disk.dataPartition.size/d' "$CFG"
+          AVAIL=$(df --output=avail -BG / | tail -n 1 | tr -dc 0-9)
+          PART=$(( AVAIL > 60 ? 48 : AVAIL - 10 )); [ "$PART" -lt 8 ] && PART=8
+          echo "free=${AVAIL}G data partition=${PART}G"
           cat >> "$CFG" <<CFG
           hw.ramSize=8192
           vm.heapSize=576
@@ -81,7 +92,7 @@ jobs:
           hw.keyboard=yes
           hw.gpu.enabled=yes
           hw.gpu.mode=swiftshader_indirect
-          disk.dataPartition.size=8G
+          disk.dataPartition.size=${PART}G
           CFG
           echo "SDK=$SDK" >> "$GITHUB_ENV"
 
@@ -153,6 +164,7 @@ jobs:
               adb shell dumpsys power | grep -i -m3 "wakefulness"
               adb shell dumpsys window | grep -m2 "mCurrentFocus\|mFocusedApp"
               adb shell wm size
+              echo "host disk: $(df -h / | tail -n 1)"; echo "phone /data: $(adb shell df -h /data | tail -n 1)"
               echo "nproc=$(nproc) $(uptime)"; ls -l /dev/kvm; grep -i -m3 "kvm\|accel\|hax" emu.log
               echo "--- host top"; top -bn1 | head -n 12 | tail -n 6 | cut -c1-110
               echo "--- device top"; adb shell top -b -n 1 -m 6 | tail -n 8 | cut -c1-110
