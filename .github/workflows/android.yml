@@ -36,7 +36,7 @@ jobs:
       - name: Install desktop + VNC + noVNC
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify fluxbox libpulse0 libnss3 libxcomposite1 libxcursor1 libxi6 libxtst6 libgl1
+          sudo apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify fluxbox libpulse0 libnss3 libxcomposite1 libxcursor1 libxi6 libxtst6 libgl1 libx11-xcb1 libxdamage1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libasound2t64
           curl -sSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           chmod +x cloudflared
 
@@ -84,11 +84,18 @@ jobs:
           x11vnc -display :99 -passwd "$VNC_PASSWORD" -forever -shared -rfbport 5900 -noxdamage -bg -o x11vnc.log
           websockify --web /usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 &
           export PATH="$SDK/platform-tools:$PATH"
-          adb wait-for-device
+          sleep 20
+          pgrep -a emulator || echo "EMULATOR PROCESS NOT RUNNING"
+          if ! timeout 180 adb wait-for-device; then
+            echo "::error title=adb-timeout::$(tail -n 30 emu.log | tr '\n' '|' | cut -c1-3000)"
+            echo "--- emu.log"; cat emu.log; echo "--- x11vnc.log"; cat x11vnc.log; ls -l /dev/kvm; exit 1
+          fi
+          BOOTED=0
           for i in $(seq 1 120); do
-            [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
+            [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && { BOOTED=1; break; }
             sleep 5
           done
+          [ "$BOOTED" = 1 ] || { echo "::error title=boot-timeout::$(tail -n 30 emu.log | tr '\n' '|' | cut -c1-3000)"; exit 1; }
           adb shell settings put system screen_off_timeout 2147483647
           adb shell svc power stayon true
           echo "booted"
