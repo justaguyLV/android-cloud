@@ -53,8 +53,11 @@ jobs:
           tail -n 15 sm.log
           ls "$SDK/system-images/android-30/google_apis_playstore/" || { echo "IMAGE MISSING"; exit 1; }
           ls "$SDK/emulator/emulator" || { echo "EMULATOR MISSING"; exit 1; }
+          export ANDROID_AVD_HOME="$HOME/.android/avd"; mkdir -p "$ANDROID_AVD_HOME"
+          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
           echo "no" | "$SDK/cmdline-tools/latest/bin/avdmanager" create avd -n play -k "system-images;android-30;google_apis_playstore;x86_64" -d pixel_2 --force
-          CFG="$HOME/.android/avd/play.avd/config.ini"
+          CFG="$ANDROID_AVD_HOME/play.avd/config.ini"
+          ls "$CFG" || { echo "AVD NOT CREATED"; ls -R "$HOME/.android" "$HOME/.config/.android" 2>&1 | head -30; exit 1; }
           sed -i '/^hw.ramSize/d;/^hw.lcd/d;/^hw.keyboard/d;/^hw.gpu/d;/^disk.dataPartition.size/d' "$CFG"
           cat >> "$CFG" <<CFG
           hw.ramSize=3072
