@@ -42,6 +42,8 @@ jobs:
 
       - name: Install Android 64-bit image (Google Play)
         run: |
+          exec > >(tee install.log) 2>&1
+          set -x
           SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SM" --licenses >/dev/null || true
@@ -60,6 +62,12 @@ jobs:
           disk.dataPartition.size=8G
           CFG
           echo "SDK=$SDK" >> "$GITHUB_ENV"
+
+      - name: Report failure to issue
+        if: failure()
+        run: |
+          { echo '**Run failed.** Last log lines:'; echo '```'; tail -n 40 install.log 2>/dev/null; tail -n 30 emu.log 2>/dev/null; echo '```'; } > fail.md
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file fail.md
 
       - name: Start display, emulator, VNC
         run: |
