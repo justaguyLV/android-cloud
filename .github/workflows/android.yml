@@ -46,8 +46,13 @@ jobs:
           set -x
           SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SM" --licenses >/dev/null || true
-          "$SM" "emulator" "platform-tools" "system-images;android-30;google_apis_playstore;x86_64" | tail -3
+          set +e +o pipefail
+          yes | "$SM" --sdk_root="$SDK" --licenses > lic.log 2>&1
+          yes | "$SM" --sdk_root="$SDK" --install "emulator" "platform-tools" "system-images;android-30;google_apis_playstore;x86_64" > sm.log 2>&1
+          echo "sdkmanager exit: $?"
+          tail -n 15 sm.log
+          ls "$SDK/system-images/android-30/google_apis_playstore/" || { echo "IMAGE MISSING"; exit 1; }
+          ls "$SDK/emulator/emulator" || { echo "EMULATOR MISSING"; exit 1; }
           echo "no" | "$SDK/cmdline-tools/latest/bin/avdmanager" create avd -n play -k "system-images;android-30;google_apis_playstore;x86_64" -d pixel_2 --force
           CFG="$HOME/.android/avd/play.avd/config.ini"
           sed -i '/^hw.ramSize/d;/^hw.lcd/d;/^hw.keyboard/d;/^hw.gpu/d;/^disk.dataPartition.size/d' "$CFG"
