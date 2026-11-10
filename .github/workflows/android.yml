@@ -131,6 +131,34 @@ jobs:
 
           Started: $(date -u). Auto-restarts before the 6h limit."
 
+      - name: Debug reporter (posts device + stream state to issue comment)
+        run: |
+          cat > dbg.sh <<'EOF'
+          export PATH="$ANDROID_HOME/platform-tools:$PATH"
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "debug starting" >/dev/null 2>&1
+          for n in $(seq 1 20); do
+            {
+              echo "### debug $n $(date -u)"
+              echo '```'
+              adb devices | tail -n +2
+              adb shell dumpsys power | grep -i -m3 "wakefulness"
+              adb shell dumpsys window | grep -m2 "mCurrentFocus\|mFocusedApp"
+              adb shell wm size
+              adb shell getprop ro.build.version.sdk
+              adb exec-out screencap -p > s.png 2>/dev/null
+              ls -l s.png | awk '{print "screencap bytes", $5}'
+              (convert s.png -format "mean=%[fx:mean]" info: 2>&1 || echo no-imagemagick) | head -c 200; echo
+              adb shell ps -A | grep -i "scrcpy\|app_process" | head -3
+              echo "--- ws.log"
+              tail -n 25 ws.log | cut -c1-220
+              echo '```'
+            } > dbg.md 2>&1
+            gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --edit-last --body-file dbg.md >/dev/null 2>&1 || gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file dbg.md >/dev/null 2>&1
+            sleep 45
+          done
+          EOF
+          nohup bash dbg.sh > dbg.out 2>&1 &
+
       - name: Keep alive (restarts itself before 6h limit)
         run: |
           export PATH="$SDK/platform-tools:$PATH"
