@@ -148,6 +148,7 @@ jobs:
               adb shell dumpsys window | grep -m2 "mCurrentFocus\|mFocusedApp"
               adb shell wm size
               adb shell getprop ro.build.version.sdk
+              echo "abilist=$(adb shell getprop ro.product.cpu.abilist) abi=$(adb shell getprop ro.product.cpu.abi) zygote=$(adb shell getprop ro.zygote) uname=$(adb shell uname -m)"
               adb exec-out screencap -p > s.png 2>/dev/null
               ls -l s.png | awk '{print "screencap bytes", $5}'
               (convert s.png -format "mean=%[fx:mean]" info: 2>&1 || echo no-imagemagick) | head -c 200; echo
