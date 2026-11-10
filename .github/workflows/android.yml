@@ -128,7 +128,7 @@ jobs:
             [ -n "$URL" ] && break
             sleep 2
           done
-          sudo renice -n -5 -p $(pgrep -f qemu-system) || true
+          sudo renice -n -10 -p $(pgrep -x adb) || true
           sudo renice -n -15 -p $(pgrep -f "node index.js") $(pgrep cloudflared) || true
           HOST=${URL#https://}
           LINK="$URL/#!action=stream&udid=emulator-5554&player=mse&ws=wss%3A%2F%2F$HOST%2F%3Faction%3Dproxy-adb%26remote%3Dtcp%253A8886%26udid%3Demulator-5554"
@@ -175,13 +175,17 @@ jobs:
       - name: Keep alive (restarts itself before 6h limit)
         run: |
           export PATH="$SDK/platform-tools:$PATH"
-          DISPATCH=$((START + 330*60)); END=$((START + 354*60)); SENT=0
+          DISPATCH=$((START + 330*60)); END=$((START + 354*60)); SENT=0; FAILS=0
           while [ "$(date +%s)" -lt "$END" ]; do
             if [ "$SENT" = 0 ] && [ "$(date +%s)" -ge "$DISPATCH" ]; then
               gh workflow run android.yml --repo "$GITHUB_REPOSITORY" && SENT=1
             fi
-            adb get-state >/dev/null 2>&1 || { echo "emulator died"; break; }
-            sleep 30
+            if adb get-state >/dev/null 2>&1; then FAILS=0; else FAILS=$((FAILS+1)); fi
+            if [ "$FAILS" -ge 6 ]; then
+              echo "::warning title=emulator-died::qemu=$(pgrep -f qemu-system | head -1) free=$(free -m | awk 'NR==2{print $3"/"$2}') emu.log: $(tail -n 25 emu.log | tr '\n' '|' | cut -c1-1500) dmesg: $(sudo dmesg 2>/dev/null | grep -i 'oom\|killed process' | tail -n 3 | tr '\n' '|' | cut -c1-600)"
+              break
+            fi
+            sleep 10
           done
           [ "$SENT" = 0 ] && gh workflow run android.yml --repo "$GITHUB_REPOSITORY"
           echo done
