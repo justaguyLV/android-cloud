@@ -1,0 +1,110 @@
+name: Android in Browser
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */3 * * *'   # safety net: restarts it if the chain ever breaks
+
+concurrency:
+  group: android
+  cancel-in-progress: false  # next run waits for this one, never kills it
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+      ISSUE: "1"
+    steps:
+      - name: Mark start
+        run: echo "START=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Install desktop + VNC + noVNC
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify fluxbox libpulse0 libnss3 libxcomposite1 libxcursor1 libxi6 libxtst6 libgl1
+          curl -sSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+
+      - name: Install Android 64-bit image (Google Play)
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SM" --licenses >/dev/null || true
+          "$SM" "emulator" "platform-tools" "system-images;android-30;google_apis_playstore;x86_64" | tail -3
+          echo "no" | "$SDK/cmdline-tools/latest/bin/avdmanager" create avd -n play -k "system-images;android-30;google_apis_playstore;x86_64" -d pixel_2 --force
+          CFG="$HOME/.android/avd/play.avd/config.ini"
+          sed -i '/^hw.ramSize/d;/^hw.lcd/d;/^hw.keyboard/d;/^hw.gpu/d;/^disk.dataPartition.size/d' "$CFG"
+          cat >> "$CFG" <<CFG
+          hw.ramSize=3072
+          hw.lcd.width=720
+          hw.lcd.height=1280
+          hw.lcd.density=280
+          hw.keyboard=yes
+          hw.gpu.enabled=yes
+          hw.gpu.mode=swiftshader_indirect
+          disk.dataPartition.size=8G
+          CFG
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+
+      - name: Start display, emulator, VNC
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 900x1150x24 &
+          sleep 2
+          fluxbox >/dev/null 2>&1 &
+          nohup "$SDK/emulator/emulator" -avd play -no-snapshot -no-audio -no-boot-anim -scale 0.8 -gpu swiftshader_indirect -memory 3072 -cores 3 > emu.log 2>&1 &
+          x11vnc -display :99 -passwd "$VNC_PASSWORD" -forever -shared -rfbport 5900 -noxdamage -bg -o x11vnc.log
+          websockify --web /usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 &
+          export PATH="$SDK/platform-tools:$PATH"
+          adb wait-for-device
+          for i in $(seq 1 120); do
+            [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
+            sleep 5
+          done
+          adb shell settings put system screen_off_timeout 2147483647
+          adb shell svc power stayon true
+          echo "booted"
+
+      - name: Public link
+        run: |
+          nohup ./cloudflared tunnel --url http://localhost:6080 --no-autoupdate > cf.log 2>&1 &
+          for i in $(seq 1 30); do
+            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' cf.log | head -1)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          LINK="$URL/vnc.html?autoconnect=true&resize=scale"
+          echo "LINK: $LINK"
+          echo "### Android link\n$LINK" >> "$GITHUB_STEP_SUMMARY"
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "**Link:** $LINK
+
+          Password = secret VNC_PASSWORD. Started: $(date -u). Auto-restarts before the 6h limit."
+
+      - name: Keep alive (restarts itself before 6h limit)
+        run: |
+          export PATH="$SDK/platform-tools:$PATH"
+          DISPATCH=$((START + 330*60)); END=$((START + 354*60)); SENT=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            if [ "$SENT" = 0 ] && [ "$(date +%s)" -ge "$DISPATCH" ]; then
+              gh workflow run android.yml --repo "$GITHUB_REPOSITORY" && SENT=1
+            fi
+            adb get-state >/dev/null 2>&1 || { echo "emulator died"; break; }
+            sleep 30
+          done
+          [ "$SENT" = 0 ] && gh workflow run android.yml --repo "$GITHUB_REPOSITORY"
+          echo done
