@@ -40,6 +40,19 @@ jobs:
           curl -sSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           chmod +x cloudflared
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "16"
+
+      - name: Build ws-scrcpy (touch UI for the phone)
+        run: |
+          git clone --depth 1 https://github.com/NetrisTV/ws-scrcpy ws-scrcpy
+          cd ws-scrcpy
+          npm install --no-audit --no-fund
+          npm run dist:prod
+          cd dist && npm install --omit=dev --no-audit --no-fund
+          ls
+
       - name: Install Android 64-bit image (Google Play)
         run: |
           exec > >(tee install.log) 2>&1
@@ -77,21 +90,15 @@ jobs:
           echo "::error title=install-log::$(tail -n 25 install.log 2>&1 | tr '\n' '|' | cut -c1-3000)"
           echo "::error title=sdk-env::SDK=$SDK ANDROID_HOME=$ANDROID_HOME ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT $(ls $ANDROID_HOME/cmdline-tools 2>&1 | tr '\n' ' ')"
 
-      - name: Start display, emulator, VNC
+      - name: Start emulator
         run: |
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 900x1150x24 &
-          sleep 2
-          fluxbox >/dev/null 2>&1 &
-          nohup "$SDK/emulator/emulator" -avd play -no-snapshot -no-audio -no-boot-anim -scale 0.8 -gpu swiftshader_indirect -memory 3072 -cores 3 > emu.log 2>&1 &
-          x11vnc -display :99 -passwd "$VNC_PASSWORD" -forever -shared -rfbport 5900 -noxdamage -bg -o x11vnc.log
-          websockify --web /usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 &
+          nohup "$SDK/emulator/emulator" -avd play -no-window -no-snapshot -no-audio -no-boot-anim -gpu swiftshader_indirect -memory 3072 -cores 3 > emu.log 2>&1 &
           export PATH="$SDK/platform-tools:$PATH"
           sleep 20
           pgrep -a emulator || echo "EMULATOR PROCESS NOT RUNNING"
           if ! timeout 180 adb wait-for-device; then
             echo "::error title=adb-timeout::$(tail -n 30 emu.log | tr '\n' '|' | cut -c1-3000)"
-            echo "--- emu.log"; cat emu.log; echo "--- x11vnc.log"; cat x11vnc.log; ls -l /dev/kvm; exit 1
+            echo "--- emu.log"; cat emu.log; ls -l /dev/kvm; exit 1
           fi
           BOOTED=0
           for i in $(seq 1 120); do
@@ -103,20 +110,26 @@ jobs:
           adb shell svc power stayon true
           echo "booted"
 
-      - name: Public link
+      - name: Phone UI + public link
         run: |
-          nohup ./cloudflared tunnel --url http://localhost:6080 --no-autoupdate > cf.log 2>&1 &
+          (cd ws-scrcpy/dist && nohup node index.js > "$GITHUB_WORKSPACE/ws.log" 2>&1 &)
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/8000) 2>/dev/null && break; sleep 1; done
+          tail -n 5 ws.log || true
+          nohup ./cloudflared tunnel --url http://localhost:8000 --no-autoupdate > cf.log 2>&1 &
           for i in $(seq 1 30); do
             URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' cf.log | head -1)
             [ -n "$URL" ] && break
             sleep 2
           done
-          LINK="$URL/vnc.html?autoconnect=true&resize=scale"
+          HOST=${URL#https://}
+          LINK="$URL/#!action=stream&udid=emulator-5554&player=mse&ws=wss%3A%2F%2F$HOST%2F%3Faction%3Dproxy-adb%26remote%3Dtcp%253A8886%26udid%3Demulator-5554"
           echo "LINK: $LINK"
-          echo "### Android link\n$LINK" >> "$GITHUB_STEP_SUMMARY"
-          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "**Link:** $LINK
+          printf '### Android link\n%s\n' "$LINK" >> "$GITHUB_STEP_SUMMARY"
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "**Phone link (touch):** $LINK
 
-          Password = secret VNC_PASSWORD. Started: $(date -u). Auto-restarts before the 6h limit."
+          Device list (if the link above does not open the screen): $URL/
+
+          Started: $(date -u). Auto-restarts before the 6h limit."
 
       - name: Keep alive (restarts itself before 6h limit)
         run: |
