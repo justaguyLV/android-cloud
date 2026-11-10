@@ -63,11 +63,11 @@ jobs:
           CFG
           echo "SDK=$SDK" >> "$GITHUB_ENV"
 
-      - name: Report failure to issue
+      - name: Report failure
         if: failure()
         run: |
-          { echo '**Run failed.** Last log lines:'; echo '```'; tail -n 40 install.log 2>/dev/null; tail -n 30 emu.log 2>/dev/null; echo '```'; } > fail.md
-          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file fail.md
+          echo "::error title=install-log::$(tail -n 25 install.log 2>&1 | tr '\n' '|' | cut -c1-3000)"
+          echo "::error title=sdk-env::SDK=$SDK ANDROID_HOME=$ANDROID_HOME ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT $(ls $ANDROID_HOME/cmdline-tools 2>&1 | tr '\n' ' ')"
 
       - name: Start display, emulator, VNC
         run: |
