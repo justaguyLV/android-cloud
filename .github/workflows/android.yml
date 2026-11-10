@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
       GH_TOKEN: ${{ github.token }}
@@ -31,45 +31,96 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
 
       - name: Install desktop + VNC + noVNC
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify fluxbox libpulse0 libnss3 libxcomposite1 libxcursor1 libxi6 libxtst6 libgl1 libx11-xcb1 libxdamage1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0
+          sudo apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify fluxbox libpulse0 libnss3 libxcomposite1 libxcursor1 libxi6 libxtst6 libgl1 libx11-xcb1 libxdamage1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libasound2t64
           curl -sSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           chmod +x cloudflared
 
-      - name: Start virtual display
+      - name: Install Android 64-bit image (Google Play)
         run: |
-          nohup Xvfb :99 -screen 0 900x1150x24 > xvfb.log 2>&1 &
-          sleep 2
-          DISPLAY=:99 nohup fluxbox > fluxbox.log 2>&1 &
-          sleep 1
+          exec > >(tee install.log) 2>&1
+          set -x
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          set +e +o pipefail
+          yes | "$SM" --sdk_root="$SDK" --licenses > lic.log 2>&1
+          yes | "$SM" --sdk_root="$SDK" --install "emulator" "platform-tools" "system-images;android-30;google_apis_playstore;x86_64" > sm.log 2>&1
+          echo "sdkmanager exit: $?"
+          tail -n 15 sm.log
+          ls "$SDK/system-images/android-30/google_apis_playstore/" || { echo "IMAGE MISSING"; exit 1; }
+          ls "$SDK/emulator/emulator" || { echo "EMULATOR MISSING"; exit 1; }
+          export ANDROID_AVD_HOME="$HOME/.android/avd"; mkdir -p "$ANDROID_AVD_HOME"
+          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          echo "no" | "$SDK/cmdline-tools/latest/bin/avdmanager" create avd -n play -k "system-images;android-30;google_apis_playstore;x86_64" -d pixel_2 --force
+          CFG="$ANDROID_AVD_HOME/play.avd/config.ini"
+          ls "$CFG" || { echo "AVD NOT CREATED"; ls -R "$HOME/.android" "$HOME/.config/.android" 2>&1 | head -30; exit 1; }
+          sed -i '/^hw.ramSize/d;/^hw.lcd/d;/^hw.keyboard/d;/^hw.gpu/d;/^disk.dataPartition.size/d' "$CFG"
+          cat >> "$CFG" <<CFG
+          hw.ramSize=3072
+          hw.lcd.width=720
+          hw.lcd.height=1280
+          hw.lcd.density=280
+          hw.keyboard=yes
+          hw.gpu.enabled=yes
+          hw.gpu.mode=swiftshader_indirect
+          disk.dataPartition.size=8G
+          CFG
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
 
-      - name: Write session script
+      - name: Report failure
+        if: failure()
         run: |
-          cat > session.sh <<'EOF'
-          #!/usr/bin/env bash
-          export PATH="$ANDROID_HOME/platform-tools:$PATH"
+          echo "::error title=install-log::$(tail -n 25 install.log 2>&1 | tr '\n' '|' | cut -c1-3000)"
+          echo "::error title=sdk-env::SDK=$SDK ANDROID_HOME=$ANDROID_HOME ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT $(ls $ANDROID_HOME/cmdline-tools 2>&1 | tr '\n' ' ')"
+
+      - name: Start display, emulator, VNC
+        run: |
           export DISPLAY=:99
-          PW="${VNC_PASSWORD:-android}"
-          x11vnc -display :99 -passwd "$PW" -forever -shared -rfbport 5900 -noxdamage -bg -o x11vnc.log
-          nohup websockify --web /usr/share/novnc 6080 localhost:5900 > websockify.log 2>&1 &
+          Xvfb :99 -screen 0 900x1150x24 &
+          sleep 2
+          fluxbox >/dev/null 2>&1 &
+          nohup "$SDK/emulator/emulator" -avd play -no-snapshot -no-audio -no-boot-anim -scale 0.8 -gpu swiftshader_indirect -memory 3072 -cores 3 > emu.log 2>&1 &
+          x11vnc -display :99 -passwd "$VNC_PASSWORD" -forever -shared -rfbport 5900 -noxdamage -bg -o x11vnc.log
+          websockify --web /usr/share/novnc 6080 localhost:5900 >/dev/null 2>&1 &
+          export PATH="$SDK/platform-tools:$PATH"
+          sleep 20
+          pgrep -a emulator || echo "EMULATOR PROCESS NOT RUNNING"
+          if ! timeout 180 adb wait-for-device; then
+            echo "::error title=adb-timeout::$(tail -n 30 emu.log | tr '\n' '|' | cut -c1-3000)"
+            echo "--- emu.log"; cat emu.log; echo "--- x11vnc.log"; cat x11vnc.log; ls -l /dev/kvm; exit 1
+          fi
+          BOOTED=0
+          for i in $(seq 1 120); do
+            [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && { BOOTED=1; break; }
+            sleep 5
+          done
+          [ "$BOOTED" = 1 ] || { echo "::error title=boot-timeout::$(tail -n 30 emu.log | tr '\n' '|' | cut -c1-3000)"; exit 1; }
+          adb shell settings put system screen_off_timeout 2147483647
+          adb shell svc power stayon true
+          echo "booted"
+
+      - name: Public link
+        run: |
           nohup ./cloudflared tunnel --url http://localhost:6080 --no-autoupdate > cf.log 2>&1 &
-          URL=""
           for i in $(seq 1 30); do
             URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' cf.log | head -1)
             [ -n "$URL" ] && break
             sleep 2
           done
-          adb shell settings put system screen_off_timeout 2147483647
-          adb shell svc power stayon true
           LINK="$URL/vnc.html?autoconnect=true&resize=scale"
           echo "LINK: $LINK"
-          printf '### Android link\n%s\n' "$LINK" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Android link\n$LINK" >> "$GITHUB_STEP_SUMMARY"
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "**Link:** $LINK
 
-          Password: ${VNC_PASSWORD:+the VNC_PASSWORD secret}${VNC_PASSWORD:-android}. Started: $(date -u). Auto-restarts before the 6h limit."
+          Password = secret VNC_PASSWORD. Started: $(date -u). Auto-restarts before the 6h limit."
+
+      - name: Keep alive (restarts itself before 6h limit)
+        run: |
+          export PATH="$SDK/platform-tools:$PATH"
           DISPATCH=$((START + 330*60)); END=$((START + 354*60)); SENT=0
           while [ "$(date +%s)" -lt "$END" ]; do
             if [ "$SENT" = 0 ] && [ "$(date +%s)" -ge "$DISPATCH" ]; then
@@ -80,26 +131,3 @@ jobs:
           done
           [ "$SENT" = 0 ] && gh workflow run android.yml --repo "$GITHUB_REPOSITORY"
           echo done
-          EOF
-          chmod +x session.sh
-
-      - name: Run Android emulator + VNC + public link
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          DISPLAY: ":99"
-        with:
-          api-level: 30
-          arch: x86_64
-          target: google_apis_playstore
-          profile: pixel_2
-          ram-size: 3072M
-          disk-size: 8G
-          emulator-boot-timeout: 600
-          disable-animations: true
-          emulator-options: -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -scale 0.8 -memory 3072 -cores 3
-          script: bash session.sh
-
-      - name: Logs on failure
-        if: always()
-        run: |
-          for f in xvfb.log x11vnc.log websockify.log cf.log; do echo "--- $f"; tail -n 20 $f 2>/dev/null; done
