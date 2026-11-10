@@ -112,6 +112,9 @@ jobs:
 
       - name: Phone UI + public link
         run: |
+          export PATH="$SDK/platform-tools:$ANDROID_HOME/platform-tools:$PATH"
+          which adb
+          adb start-server
           (cd ws-scrcpy/dist && nohup node index.js > "$GITHUB_WORKSPACE/ws.log" 2>&1 &)
           for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/8000) 2>/dev/null && break; sleep 1; done
           tail -n 5 ws.log || true
