@@ -68,7 +68,8 @@ jobs:
           docker run -itd --rm --privileged --name redroid -p 5555:5555 \
             redroid/redroid:11.0.0-latest \
             androidboot.redroid_width=540 androidboot.redroid_height=960 androidboot.redroid_dpi=240 \
-            androidboot.redroid_fps=30 androidboot.redroid_gpu_mode=guest androidboot.use_memfd=true
+            androidboot.redroid_fps=30 androidboot.redroid_gpu_mode=guest androidboot.use_memfd=true \
+            androidboot.redroid_net_ndns=2 androidboot.redroid_net_dns1=8.8.8.8 androidboot.redroid_net_dns2=1.1.1.1
           adb start-server
           BOOTED=0
           for i in $(seq 1 80); do
@@ -88,13 +89,18 @@ jobs:
           adb shell getprop ro.product.cpu.abilist
           echo booted
 
-      - name: Install Firefox (best effort)
+      - name: Install a browser (Iceraven = Firefox with add-ons) + internet check
         continue-on-error: true
         run: |
-          VER=$(curl -s https://ftp.mozilla.org/pub/fenix/releases/ | grep -o 'href="[0-9][0-9.]*/"' | tr -dc '0-9.\n' | sort -V | tail -n 1)
-          echo "firefox version: $VER"
-          curl -fsSL -o firefox.apk "https://ftp.mozilla.org/pub/fenix/releases/$VER/android/fenix-$VER-android-x86_64/fenix-$VER.multi.android-x86_64.apk"
-          adb install -r firefox.apk
+          API=https://api.github.com/repos/fork-maintainers/iceraven-browser/releases/latest
+          URL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "$API" | python3 -c "import sys,json; r=json.load(sys.stdin); print(next(a['browser_download_url'] for a in r['assets'] if a['name'].endswith('x86_64.apk')))")
+          echo "apk: $URL"
+          curl -fsSL -o browser.apk "$URL"
+          adb install -r browser.apk
+          PK=$(adb shell pm list packages | grep -i "iceraven\|fenix\|firefox" | tr '\n' ' ')
+          NET=$(adb shell ping -c 2 -W 3 8.8.8.8 2>&1 | tail -n 2 | tr '\n' '|')
+          DNS=$(adb shell ping -c 1 -W 3 github.com 2>&1 | tail -n 2 | tr '\n' '|')
+          echo "::notice title=browser-and-net::pkg=$PK net=$NET dns=$DNS"
 
       - name: Phone UI + public link
         run: |
