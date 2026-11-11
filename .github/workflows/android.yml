@@ -137,6 +137,9 @@ jobs:
               adb devices | tail -n +2
               adb shell wm size
               echo "abilist=$(adb shell getprop ro.product.cpu.abilist) android=$(adb shell getprop ro.build.version.release)"
+              echo "browser: $(adb shell pm list packages | grep -i 'iceraven\|fenix\|firefox' | tr '\n' ' ')"
+              echo "net: $(adb shell ping -c 1 -W 3 8.8.8.8 2>&1 | tail -n 2 | tr '\n' '|')"
+              echo "dns: $(adb shell ping -c 1 -W 3 github.com 2>&1 | tail -n 2 | tr '\n' '|')"
               echo "host disk: $(df -h / | tail -n 1)"; echo "phone /data: $(adb shell df -h /data | tail -n 1)"
               echo "nproc=$(nproc) $(uptime)"
               echo "--- host top"; top -bn1 | head -n 12 | tail -n 6 | cut -c1-110
