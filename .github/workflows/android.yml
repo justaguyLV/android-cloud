@@ -35,12 +35,18 @@ jobs:
 
       - name: Binder kernel modules (needed by Redroid)
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y linux-modules-extra-$(uname -r)
-          sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
-          sudo modprobe ashmem_linux || true
-          ls -l /dev/binder /dev/hwbinder /dev/vndbinder || true
-          (which adb || sudo apt-get install -y adb) >/dev/null 2>&1 || true
+          set +e
+          uname -r
+          sudo apt-get update -y > apt.log 2>&1; echo "update rc=$?"
+          sudo apt-get install -y linux-modules-extra-$(uname -r) >> apt.log 2>&1; RC=$?
+          echo "install rc=$RC"
+          [ "$RC" != 0 ] && echo "::warning title=apt-modules-extra::kernel=$(uname -r) rc=$RC $(tail -n 12 apt.log | tr '\n' '|' | cut -c1-1500) avail=$(apt-cache search linux-modules-extra | grep -i azure | head -n 3 | tr '\n' '|')"
+          sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"; echo "modprobe binder rc=$?"
+          sudo modprobe ashmem_linux; echo "modprobe ashmem rc=$?"
+          ls -l /dev/binder /dev/hwbinder /dev/vndbinder
+          grep -i "binder" /proc/filesystems
+          (which adb || sudo apt-get install -y adb) >/dev/null 2>&1
+          exit 0
 
       - uses: actions/setup-node@v4
         with:
