@@ -21,7 +21,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       ISSUE: "1"
-      ANDROID_SERIAL: "localhost:5555"
     steps:
       - name: Mark start
         run: |
@@ -56,6 +55,8 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/NetrisTV/ws-scrcpy ws-scrcpy
           cd ws-scrcpy
+          sed -i 's/bitrate: 524288/bitrate: 2500000/; s/maxFps: 24/maxFps: 30/; s/iFrameInterval: 5/iFrameInterval: 3/; s/new Size(480, 480)/new Size(540, 960)/' src/app/player/WebCodecsPlayer.ts
+          grep -n "bitrate\|maxFps\|Size(" src/app/player/WebCodecsPlayer.ts | head -n 6
           npm install --no-audit --no-fund
           npm run dist:prod
           cd dist && npm install --omit=dev --no-audit --no-fund
@@ -81,6 +82,15 @@ jobs:
             echo "::error title=redroid-boot::$(docker logs redroid 2>&1 | tail -n 30 | tr '\n' '|' | cut -c1-2500) binder: $(ls /dev | grep -i binder | tr '\n' ' ') lsmod: $(lsmod | grep -i 'binder\|ashmem' | tr '\n' '|')"
             exit 1
           fi
+          if adb devices | grep -q '^emulator-5554[[:space:]]*device'; then
+            adb disconnect localhost:5555 >/dev/null 2>&1
+            SER=emulator-5554
+          else
+            SER=localhost:5555
+          fi
+          echo "ANDROID_SERIAL=$SER" >> "$GITHUB_ENV"
+          export ANDROID_SERIAL=$SER
+          echo "serial=$SER"; adb devices
           adb shell settings put system screen_off_timeout 2147483647
           adb shell svc power stayon true
           adb shell settings put global window_animation_scale 0
@@ -134,7 +144,9 @@ jobs:
           sudo renice -n -10 -p $(pgrep -x adb) || true
           sudo renice -n -15 -p $(pgrep -f "node index.js") $(pgrep cloudflared) || true
           HOST=${URL#https://}
-          LINK="$URL/#!action=stream&udid=localhost%3A5555&player=webcodecs&ws=wss%3A%2F%2F$HOST%2F%3Faction%3Dproxy-adb%26remote%3Dtcp%253A8886%26udid%3Dlocalhost%253A5555"
+          U1=$(python3 -c "import urllib.parse,os;print(urllib.parse.quote(os.environ['ANDROID_SERIAL'],safe=''))")
+          U2=$(python3 -c "import urllib.parse,os;print(urllib.parse.quote(urllib.parse.quote(os.environ['ANDROID_SERIAL'],safe=''),safe=''))")
+          LINK="$URL/#!action=stream&udid=$U1&player=webcodecs&ws=wss%3A%2F%2F$HOST%2F%3Faction%3Dproxy-adb%26remote%3Dtcp%253A8886%26udid%3D$U2"
           echo "LINK: $LINK"
           printf '### Android link\n%s\n' "$LINK" >> "$GITHUB_STEP_SUMMARY"
           gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "**Phone link (touch, Redroid):** $LINK
@@ -177,7 +189,7 @@ jobs:
             if [ "$SENT" = 0 ] && [ "$(date +%s)" -ge "$DISPATCH" ]; then
               gh workflow run android.yml --repo "$GITHUB_REPOSITORY" && SENT=1
             fi
-            adb connect localhost:5555 >/dev/null 2>&1
+            [ "$ANDROID_SERIAL" = "localhost:5555" ] && adb connect localhost:5555 >/dev/null 2>&1
             if [ "$(adb get-state 2>/dev/null)" = "device" ]; then FAILS=0; else FAILS=$((FAILS+1)); fi
             if [ "$FAILS" -ge 6 ]; then
               echo "::warning title=android-died::$(docker logs redroid 2>&1 | tail -n 25 | tr '\n' '|' | cut -c1-1800) free=$(free -m | awk 'NR==2{print $3"/"$2}')"
