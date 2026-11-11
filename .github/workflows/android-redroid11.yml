@@ -1,0 +1,187 @@
+name: Android in Browser (Redroid 11 backup)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: android-r11
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE: "1"
+      ANDROID_SERIAL: "localhost:5555"
+    steps:
+      - name: Mark start
+        run: |
+          echo "START=$(date +%s)" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/julia* /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /opt/microsoft || true
+          df -h / | tail -n 1
+
+      - name: Binder kernel modules (needed by Redroid)
+        run: |
+          set +e
+          uname -r
+          sudo apt-get update -y > apt.log 2>&1; echo "update rc=$?"
+          sudo apt-get install -y linux-modules-extra-$(uname -r) >> apt.log 2>&1; RC=$?
+          echo "install rc=$RC"
+          [ "$RC" != 0 ] && echo "::warning title=apt-modules-extra::kernel=$(uname -r) rc=$RC $(tail -n 12 apt.log | tr '\n' '|' | cut -c1-1500) avail=$(apt-cache search linux-modules-extra | grep -i azure | head -n 3 | tr '\n' '|')"
+          sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"; echo "modprobe binder rc=$?"
+          sudo modprobe ashmem_linux; echo "modprobe ashmem rc=$?"
+          ls -l /dev/binder /dev/hwbinder /dev/vndbinder
+          grep -i "binder" /proc/filesystems
+          (which adb || sudo apt-get install -y adb) >/dev/null 2>&1
+          exit 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "16"
+
+      - name: Build ws-scrcpy (touch UI for the phone)
+        run: |
+          git clone --depth 1 https://github.com/NetrisTV/ws-scrcpy ws-scrcpy
+          cd ws-scrcpy
+          npm install --no-audit --no-fund
+          npm run dist:prod
+          cd dist && npm install --omit=dev --no-audit --no-fund
+          cd "$GITHUB_WORKSPACE"
+          curl -sSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+
+      - name: Start Android (Redroid, no QEMU)
+        run: |
+          docker run -itd --rm --privileged --name redroid -p 5555:5555 \
+            redroid/redroid:11.0.0-latest \
+            androidboot.redroid_width=540 androidboot.redroid_height=960 androidboot.redroid_dpi=240 \
+            androidboot.redroid_fps=30 androidboot.redroid_gpu_mode=guest androidboot.use_memfd=true \
+            androidboot.redroid_net_ndns=2 androidboot.redroid_net_dns1=8.8.8.8 androidboot.redroid_net_dns2=1.1.1.1
+          adb start-server
+          BOOTED=0
+          for i in $(seq 1 80); do
+            adb connect localhost:5555 >/dev/null 2>&1
+            [ "$(adb -s localhost:5555 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && { BOOTED=1; break; }
+            sleep 3
+          done
+          if [ "$BOOTED" != 1 ]; then
+            echo "::error title=redroid-boot::$(docker logs redroid 2>&1 | tail -n 30 | tr '\n' '|' | cut -c1-2500) binder: $(ls /dev | grep -i binder | tr '\n' ' ') lsmod: $(lsmod | grep -i 'binder\|ashmem' | tr '\n' '|')"
+            exit 1
+          fi
+          adb shell settings put system screen_off_timeout 2147483647
+          adb shell svc power stayon true
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          adb shell getprop ro.product.cpu.abilist
+          echo booted
+
+      - name: Install browsers (Via, Brave, DuckDuckGo) + internet check
+        continue-on-error: true
+        run: |
+          set +e
+          # Via: tiny, uses the system WebView (lightest)
+          curl -fsSL -o via.apk https://res.viayoo.com/v1/via-release.apk && adb install -r via.apk
+          # Brave: latest stable x64 build from GitHub releases
+          cat > pick.py <<'PY'
+          import sys,json
+          for r in json.load(sys.stdin):
+              if not r['prerelease']:
+                  for a in r['assets']:
+                      if a['name']=='BraveMonox64.apk':
+                          print(a['browser_download_url']); raise SystemExit
+          PY
+          BURL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/brave/brave-browser/releases?per_page=30" | python3 pick.py)
+          echo "brave: $BURL"
+          [ -n "$BURL" ] && curl -fsSL -o brave.apk "$BURL" && adb install -r brave.apk
+          # DuckDuckGo: from F-Droid
+          DVER=$(curl -s https://f-droid.org/api/v1/packages/com.duckduckgo.mobile.android | python3 -c "import sys,json; print(json.load(sys.stdin)['suggestedVersionCode'])")
+          echo "ddg version: $DVER"
+          [ -n "$DVER" ] && curl -fsSL -o ddg.apk "https://f-droid.org/repo/com.duckduckgo.mobile.android_$DVER.apk" && adb install -r ddg.apk
+          PK=$(adb shell pm list packages | grep -i "mark.via\|brave\|duckduckgo" | tr '\n' ' ')
+          NET=$(adb shell ping -c 2 -W 3 8.8.8.8 2>&1 | tail -n 2 | tr '\n' '|')
+          DNS=$(adb shell ping -c 1 -W 3 github.com 2>&1 | tail -n 2 | tr '\n' '|')
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "browsers installed: $PK
+          net: $NET
+          dns: $DNS" >/dev/null 2>&1
+          exit 0
+
+      - name: Phone UI + public link
+        run: |
+          adb start-server
+          (cd ws-scrcpy/dist && nohup node index.js > "$GITHUB_WORKSPACE/ws.log" 2>&1 &)
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/8000) 2>/dev/null && break; sleep 1; done
+          tail -n 5 ws.log || true
+          nohup ./cloudflared tunnel --url http://localhost:8000 --no-autoupdate > cf.log 2>&1 &
+          for i in $(seq 1 30); do
+            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' cf.log | head -1)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          sudo renice -n -10 -p $(pgrep -x adb) || true
+          sudo renice -n -15 -p $(pgrep -f "node index.js") $(pgrep cloudflared) || true
+          HOST=${URL#https://}
+          LINK="$URL/#!action=stream&udid=localhost%3A5555&player=webcodecs&ws=wss%3A%2F%2F$HOST%2F%3Faction%3Dproxy-adb%26remote%3Dtcp%253A8886%26udid%3Dlocalhost%253A5555"
+          echo "LINK: $LINK"
+          printf '### Android link\n%s\n' "$LINK" >> "$GITHUB_STEP_SUMMARY"
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "**Phone link (touch, Redroid):** $LINK
+
+          Device list (if the link above does not open the screen): $URL/
+
+          Started: $(date -u). Auto-restarts before the 6h limit."
+
+      - name: Debug reporter (posts device + stream state to issue comment)
+        run: |
+          cat > dbg.sh <<'EOF'
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "debug starting" >/dev/null 2>&1
+          for n in $(seq 1 15); do
+            {
+              echo "### redroid debug $n $(date -u)"
+              echo '```'
+              adb devices | tail -n +2
+              adb shell wm size
+              echo "abilist=$(adb shell getprop ro.product.cpu.abilist) android=$(adb shell getprop ro.build.version.release)"
+              echo "browser: $(adb shell pm list packages | grep -i 'mark.via\|brave\|duckduckgo' | tr '\n' ' ')"
+              echo "net: $(adb shell ping -c 1 -W 3 8.8.8.8 2>&1 | tail -n 2 | tr '\n' '|')"
+              echo "dns: $(adb shell ping -c 1 -W 3 github.com 2>&1 | tail -n 2 | tr '\n' '|')"
+              echo "host disk: $(df -h / | tail -n 1)"; echo "phone /data: $(adb shell df -h /data | tail -n 1)"
+              echo "nproc=$(nproc) $(uptime)"
+              echo "--- host top"; top -bn1 | head -n 12 | tail -n 6 | cut -c1-110
+              echo "--- device top"; adb shell top -b -n 1 -m 6 | tail -n 8 | cut -c1-110
+              echo "--- ws.log"; tail -n 15 ws.log | cut -c1-200
+              echo '```'
+            } > dbg.md 2>&1
+            gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --edit-last --body-file dbg.md >/dev/null 2>&1 || gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file dbg.md >/dev/null 2>&1
+            sleep 60
+          done
+          EOF
+          nohup bash dbg.sh > dbg.out 2>&1 &
+
+      - name: Keep alive (restarts itself before 6h limit)
+        run: |
+          DISPATCH=$((START + 330*60)); END=$((START + 354*60)); SENT=0; FAILS=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            if [ "$SENT" = 0 ] && [ "$(date +%s)" -ge "$DISPATCH" ]; then
+              gh workflow run android-redroid11.yml --repo "$GITHUB_REPOSITORY" && SENT=1
+            fi
+            adb connect localhost:5555 >/dev/null 2>&1
+            if [ "$(adb get-state 2>/dev/null)" = "device" ]; then FAILS=0; else FAILS=$((FAILS+1)); fi
+            if [ "$FAILS" -ge 6 ]; then
+              echo "::warning title=android-died::$(docker logs redroid 2>&1 | tail -n 25 | tr '\n' '|' | cut -c1-1800) free=$(free -m | awk 'NR==2{print $3"/"$2}')"
+              break
+            fi
+            sleep 10
+          done
+          [ "$SENT" = 0 ] && gh workflow run android-redroid11.yml --repo "$GITHUB_REPOSITORY"
+          echo done
