@@ -89,18 +89,35 @@ jobs:
           adb shell getprop ro.product.cpu.abilist
           echo booted
 
-      - name: Install a browser (Iceraven = Firefox with add-ons) + internet check
+      - name: Install browsers (Via, Brave, DuckDuckGo) + internet check
         continue-on-error: true
         run: |
-          API=https://api.github.com/repos/fork-maintainers/iceraven-browser/releases/latest
-          URL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "$API" | python3 -c "import sys,json; r=json.load(sys.stdin); print(next(a['browser_download_url'] for a in r['assets'] if a['name'].endswith('x86_64.apk')))")
-          echo "apk: $URL"
-          curl -fsSL -o browser.apk "$URL"
-          adb install -r browser.apk
-          PK=$(adb shell pm list packages | grep -i "iceraven\|fenix\|firefox" | tr '\n' ' ')
+          set +e
+          # Via: tiny, uses the system WebView (lightest)
+          curl -fsSL -o via.apk https://res.viayoo.com/v1/via-release.apk && adb install -r via.apk
+          # Brave: latest stable x64 build from GitHub releases
+          cat > pick.py <<'PY'
+          import sys,json
+          for r in json.load(sys.stdin):
+              if not r['prerelease']:
+                  for a in r['assets']:
+                      if a['name']=='BraveMonox64.apk':
+                          print(a['browser_download_url']); raise SystemExit
+          PY
+          BURL=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/brave/brave-browser/releases?per_page=30" | python3 pick.py)
+          echo "brave: $BURL"
+          [ -n "$BURL" ] && curl -fsSL -o brave.apk "$BURL" && adb install -r brave.apk
+          # DuckDuckGo: from F-Droid
+          DVER=$(curl -s https://f-droid.org/api/v1/packages/com.duckduckgo.mobile.android | python3 -c "import sys,json; print(json.load(sys.stdin)['suggestedVersionCode'])")
+          echo "ddg version: $DVER"
+          [ -n "$DVER" ] && curl -fsSL -o ddg.apk "https://f-droid.org/repo/com.duckduckgo.mobile.android_$DVER.apk" && adb install -r ddg.apk
+          PK=$(adb shell pm list packages | grep -i "mark.via\|brave\|duckduckgo" | tr '\n' ' ')
           NET=$(adb shell ping -c 2 -W 3 8.8.8.8 2>&1 | tail -n 2 | tr '\n' '|')
           DNS=$(adb shell ping -c 1 -W 3 github.com 2>&1 | tail -n 2 | tr '\n' '|')
-          echo "::notice title=browser-and-net::pkg=$PK net=$NET dns=$DNS"
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "browsers installed: $PK
+          net: $NET
+          dns: $DNS" >/dev/null 2>&1
+          exit 0
 
       - name: Phone UI + public link
         run: |
@@ -137,7 +154,7 @@ jobs:
               adb devices | tail -n +2
               adb shell wm size
               echo "abilist=$(adb shell getprop ro.product.cpu.abilist) android=$(adb shell getprop ro.build.version.release)"
-              echo "browser: $(adb shell pm list packages | grep -i 'iceraven\|fenix\|firefox' | tr '\n' ' ')"
+              echo "browser: $(adb shell pm list packages | grep -i 'mark.via\|brave\|duckduckgo' | tr '\n' ' ')"
               echo "net: $(adb shell ping -c 1 -W 3 8.8.8.8 2>&1 | tail -n 2 | tr '\n' '|')"
               echo "dns: $(adb shell ping -c 1 -W 3 github.com 2>&1 | tail -n 2 | tr '\n' '|')"
               echo "host disk: $(df -h / | tail -n 1)"; echo "phone /data: $(adb shell df -h /data | tail -n 1)"
